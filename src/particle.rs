@@ -1,17 +1,19 @@
 use std::{f32::consts::TAU, sync::Arc};
 
-use macroquad::{input, prelude::*};
+use macroquad::prelude::*;
+use rayon::prelude::*;
+use serde::{Deserialize, Serialize};
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Interaction {
     pub dist: f32,
     pub strength: f32,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SimulationSettings {
     pub species_relations: Vec<Vec<Interaction>>,
-    pub species: Vec<Color>,
+    pub species: Vec<Vec4>,
     pub particle_size: f32,
     pub interaction_dist: f32,
     pub friction: f32,
@@ -19,7 +21,7 @@ pub struct SimulationSettings {
 
 impl SimulationSettings {
     fn species_color(&self, species: Species) -> Option<Color> {
-        self.species.get(species.0).copied()
+        self.species.get(species.0).copied().map(Color::from_vec)
     }
 
     pub fn interaction(&self, first: Species, second: Species) -> &Interaction {
@@ -56,42 +58,55 @@ impl Particle {
         let interact_dist = self.settings.interaction_dist;
         let interact_dist2 = interact_dist.powi(2);
 
-        let mut force = vec2(0., 0.);
+        let (mut force, new_position, update_count) = other
+            .par_iter()
+            .map(|other| {
+                let to_other = other.position - self.position;
+                let dist = to_other.length_squared();
 
-        let mut new_position = Vec2::ZERO;
-        let mut update_count: usize = 0;
+                if dist < 1E-3 {
+                    return (Vec2::ZERO, None);
+                }
 
-        for other in other.iter() {
-            let to_other = other.position - self.position;
-            let dist = to_other.length_squared();
+                if dist > interact_dist2 {
+                    return (Vec2::ZERO, None);
+                }
 
-            if dist < 1E-3 {
-                continue;
-            }
+                let dist = dist.sqrt();
+                let dir = to_other / dist;
 
-            if dist > interact_dist2 {
-                continue;
-            }
+                let interaction = self.settings.interaction(self.species, other.species);
 
-            let dist = dist.sqrt();
-            let dir = to_other / dist;
+                let new_pos = if dist < self.settings.particle_size * 2. {
+                    Some((self.position + to_other / 2.) - dir * self.settings.particle_size)
+                } else {
+                    None
+                };
 
-            let interaction = self.settings.interaction(self.species, other.species);
+                let force = dir
+                    * interaction.strength
+                    * (interaction.dist - (dist - self.settings.particle_size * 2.))
+                    / interact_dist;
 
-            force += dir
-                * interaction.strength
-                * (interaction.dist - (dist - self.settings.particle_size * 2.))
-                / interact_dist;
-
-            if dist < self.settings.particle_size * 2. {
-                new_position +=
-                    (self.position + to_other / 2.) - dir * self.settings.particle_size * 1.1;
-                update_count += 1;
-            }
-        }
+                (force, new_pos)
+            })
+            .fold(
+                || (Vec2::ZERO, Vec2::ZERO, 0usize),
+                |(total_force, total_new_pos, update_count), (force, pos)| {
+                    (
+                        total_force + force,
+                        total_new_pos + pos.clone().unwrap_or(Vec2::ZERO),
+                        update_count + if pos.is_some() { 1 } else { 0 },
+                    )
+                },
+            )
+            .reduce(
+                || (Vec2::ZERO, Vec2::ZERO, 0usize),
+                |a, b| (a.0 + b.0, a.1 + b.1, a.2 + b.2),
+            );
 
         if update_count > 1 {
-            new_position /= update_count as f32;
+            let new_position = new_position / update_count as f32;
             force += (new_position - self.position) * 10.;
             self.position = new_position;
         }
@@ -100,37 +115,32 @@ impl Particle {
         self.velocity += self.accel * dt;
     }
 
-    pub fn integrate(&mut self, dt: f32, mouse_pos: Option<Vec2>) {
-        self.position += self.velocity * dt;
-
-        let modspace = |x: &mut f32, v: f32, min: f32, max: f32| {
+    pub fn elliptic_space(mut position: Vec2, velocity: Vec2, min: Vec2, max: Vec2) -> Vec2 {
+        fn modspace(x: &mut f32, v: f32, min: f32, max: f32) {
             if *x > max && v > 0. {
                 *x -= max - min;
             } else if *x < min && v < 0. {
                 *x += max - min;
             }
-        };
+        }
 
-        modspace(
-            &mut self.position.x,
-            self.velocity.x,
-            self.bounds.0.x,
-            self.bounds.1.x,
-        );
+        modspace(&mut position.x, velocity.x, min.x, max.x);
+        modspace(&mut position.y, velocity.y, min.y, max.y);
 
-        modspace(
-            &mut self.position.y,
-            self.velocity.y,
-            self.bounds.0.y,
-            self.bounds.1.y,
-        );
+        position
+    }
 
+    pub fn integrate(&mut self, dt: f32, mouse_pos: Option<Vec2>) {
+        self.position += self.velocity * dt;
+
+        self.position =
+            Self::elliptic_space(self.position, self.velocity, self.bounds.0, self.bounds.1);
         // self.position = self.position.clamp(self.bounds.0, self.bounds.1);
 
         if let Some(mouse_pos) = mouse_pos {
             let diff = mouse_pos - self.position;
             if diff.length() < 200. {
-                self.velocity += diff.normalize() * dt * 500.;
+                self.velocity += diff.normalize() * dt * diff.length_squared() * 1.0E-1;
             }
         }
 
