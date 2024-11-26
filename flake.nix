@@ -12,13 +12,13 @@
         naersk-lib = pkgs.callPackage naersk { };
         libPath = with pkgs; 
           lib.makeLibraryPath [ 
+            xorg.libX11
             libffi
             wayland-protocols
             wayland
             libGL
             xorg.libxcb
 
-            xorg.libX11
             xorg.libX11
             xorg.libXrandr
             xorg.libXinerama
