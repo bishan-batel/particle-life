@@ -1,83 +1,18 @@
 mod particle;
 
-use macroquad::{
-    prelude::*,
-    ui::{self, root_ui, widgets},
-};
-
-use miniquad::fs;
-use particle::{Interaction, Particle, SimulationSettings};
+use macroquad::prelude::*;
 use rayon::prelude::*;
-use serde::Deserialize;
-use std::{
-    fs::File,
-    io::{Read, Write},
-    sync::Arc,
-    time::SystemTime,
-};
+
+use particle::{Particle, SimulationSettings};
+use std::{fs::File, io::Write, sync::Arc};
 
 #[macroquad::main("BasicShapes")]
 async fn main() -> Result<(), anyhow::Error> {
     const COUNT: usize = 1000;
-    let settings = Arc::new({
-        let mut str = String::new();
-
-        File::open("sim_settings.json")
-            .map(|mut f| f.read_to_string(&mut str))
-            .map(move |_| str)
-            .map_err(|x| anyhow::Error::from(x))
-            .and_then(|x| {
-                serde_json::from_str::<SimulationSettings>(x.as_ref()).map_err(anyhow::Error::from)
-            })
-            .unwrap_or_else(|_| {
-                let mut settings = SimulationSettings {
-                    species_relations: vec![],
-                    species: [
-                        Color::from_rgba(243, 139, 168, 255),
-                        Color::from_rgba(250, 179, 135, 255),
-                        Color::from_rgba(249, 226, 175, 255),
-                        Color::from_rgba(166, 227, 161, 255),
-                        Color::from_rgba(148, 226, 213, 255),
-                        Color::from_rgba(137, 180, 250, 255),
-                        Color::from_rgba(203, 166, 247, 255),
-                        // Color::from_rgba(24, 24, 37, 255),
-                    ]
-                    .into_iter()
-                    .map(|c| c.to_vec())
-                    .collect(),
-                    friction: 0.9,
-                    interaction_dist: 70.0,
-                    particle_size: 5.,
-                };
-
-                let count = settings.species.len();
-
-                rand::srand(
-                    SystemTime::now()
-                        .duration_since(std::time::UNIX_EPOCH)
-                        .unwrap()
-                        .as_secs(),
-                );
-
-                settings.species_relations = (0..count)
-                    .map(|_| {
-                        let mut v = vec![];
-
-                        for _ in 0..count {
-                            v.push(Interaction {
-                                dist: rand::gen_range(0., 100.),
-                                strength: rand::gen_range(-2., 1f32),
-                            })
-                            // v.push(rand::gen_range(-1., 1.));
-                            // v.push(1.);
-                        }
-                        v
-                    })
-                    .collect();
-
-                settings
-            })
-    });
+    let settings = Arc::new(
+        SimulationSettings::from_file("sim_settings.json")
+            .unwrap_or_else(|_| SimulationSettings::random()),
+    );
 
     let size = vec2(3200., 2000.) / 2.;
     request_new_screen_size(size.x, size.y);
@@ -87,6 +22,8 @@ async fn main() -> Result<(), anyhow::Error> {
         .collect();
 
     let mut show_vel_lines = true;
+
+    let mut radius = 0.;
 
     loop {
         clear_background(color_u8!(24, 24, 37, 255));
@@ -98,8 +35,15 @@ async fn main() -> Result<(), anyhow::Error> {
 
         let dt = get_frame_time();
 
+        // iterating through all particles,
+        // cloning them
+        // and giving each 'dt' and the list of all others
+        //
+        // and then collecting to a vec
         particles = particles
-            .par_iter()
+            // rayon will decide also how to divy up the work based off the system
+            // there are still some differences tho
+            .par_iter() // rayon's parallel iter
             .map(Clone::clone)
             .map(|mut p| {
                 p.interact(dt, &particles);
@@ -107,31 +51,27 @@ async fn main() -> Result<(), anyhow::Error> {
             })
             .collect();
 
-        let mouse_pos = if is_mouse_button_down(MouseButton::Left) {
-            Some(size * Vec2::from(mouse_position_local()))
+        let mouse_pos = size * Vec2::from(mouse_position_local());
+        let mouse_pos_opt = if is_mouse_button_down(MouseButton::Left) {
+            Some(mouse_pos)
         } else {
             None
         };
 
         particles
             .par_iter_mut()
-            .for_each(|p| p.integrate(dt, mouse_pos));
+            .for_each(|p| p.integrate(dt, mouse_pos_opt));
 
         show_vel_lines ^= is_key_pressed(KeyCode::Key1);
 
         if show_vel_lines {
-            for particle in particles.iter() {
-                particle.draw_vel()
-            }
+            particles.iter().for_each(Particle::draw_vel);
         }
 
-        for particle in particles.iter() {
-            particle.draw()
-        }
+        particles.iter().for_each(Particle::draw);
 
-        if let Some(pos) = mouse_pos {
-            draw_circle_lines(pos.x, pos.y, 200., 1., WHITE);
-        }
+        radius = radius.lerp(if mouse_pos_opt.is_some() { 200. } else { 5. }, dt * 10.);
+        draw_circle_lines(mouse_pos.x, mouse_pos.y, radius, 1., WHITE);
 
         if is_key_pressed(KeyCode::S) && is_key_down(KeyCode::LeftControl) {
             if let Err(err) = save_settings(&settings) {

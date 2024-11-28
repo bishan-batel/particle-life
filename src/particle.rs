@@ -1,4 +1,4 @@
-use std::{f32::consts::TAU, sync::Arc};
+use std::{f32::consts::TAU, fs::File, io::Read, path::Path, sync::Arc, time::SystemTime};
 
 use macroquad::prelude::*;
 use rayon::prelude::*;
@@ -20,6 +20,65 @@ pub struct SimulationSettings {
 }
 
 impl SimulationSettings {
+    pub fn from_file(path: impl AsRef<Path>) -> Result<SimulationSettings, anyhow::Error> {
+        let mut str = String::new();
+
+        let mut file = File::open(path)?;
+
+        file.read_to_string(&mut str)?;
+
+        let settings = serde_json::from_str::<SimulationSettings>(str.as_ref())?;
+
+        Ok(settings)
+    }
+
+    pub fn random() -> Self {
+        let mut settings = Self {
+            species_relations: vec![],
+            species: [
+                Color::from_rgba(243, 139, 168, 255),
+                Color::from_rgba(250, 179, 135, 255),
+                Color::from_rgba(249, 226, 175, 255),
+                Color::from_rgba(166, 227, 161, 255),
+                Color::from_rgba(148, 226, 213, 255),
+                Color::from_rgba(137, 180, 250, 255),
+                Color::from_rgba(203, 166, 247, 255),
+                // Color::from_rgba(24, 24, 37, 255),
+            ]
+            .into_iter()
+            .map(|c| c.to_vec())
+            .collect(),
+            friction: 0.9,
+            interaction_dist: 70.0,
+            particle_size: 5.,
+        };
+
+        let count = settings.species.len();
+
+        rand::srand(
+            SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_secs(),
+        );
+
+        settings.species_relations = (0..count)
+            .map(|_| {
+                let mut v = vec![];
+
+                for _ in 0..count {
+                    v.push(Interaction {
+                        dist: rand::gen_range(0., 100.),
+                        strength: rand::gen_range(-2., 1f32),
+                    })
+                }
+                v
+            })
+            .collect();
+
+        settings
+    }
+
     fn species_color(&self, species: Species) -> Option<Color> {
         self.species.get(species.0).copied().map(Color::from_vec)
     }
@@ -171,9 +230,5 @@ impl Particle {
             self.settings.particle_size,
             self.settings.species_color(self.species).unwrap(),
         );
-    }
-
-    pub fn species(&self) -> Species {
-        self.species
     }
 }
